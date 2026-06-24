@@ -15,7 +15,12 @@ export async function buildCustomTools(): Promise<ToolDefinition[]> {
 	const tools: ToolDefinition[] = [];
 
 	if (config.databaseUrl) {
-		tools.push(...createPostgresTools(config.databaseUrl));
+		tools.push(
+			...createPostgresTools(config.databaseUrl, {
+				mode: config.databaseSsl,
+				caCertPath: config.databaseCaCert,
+			}),
+		);
 	}
 	if (config.tavilyApiKey) {
 		tools.push(...createTavilyTools(config.tavilyApiKey, config.tavilyBaseUrl));

@@ -20,7 +20,10 @@ import {
 	type SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { config } from "./config.ts";
+import { createContextMonitor } from "./extensions/context-monitor.ts";
+import { loadSystemPrompt } from "./prompt.ts";
 import { buildCustomTools } from "./tools/index.ts";
+import { createMemoryStore } from "./tools/memory.ts";
 
 /** Provider id used to register the local Ollama endpoint. */
 export const PROVIDER = "ollama";
@@ -57,8 +60,8 @@ function buildRegistry(): { authStorage: AuthStorage; modelRegistry: ModelRegist
 				reasoning: false,
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 128000,
-				maxTokens: 8192,
+				contextWindow: config.contextWindow,
+				maxTokens: config.maxTokens,
 			},
 		],
 	});
@@ -76,11 +79,39 @@ function buildRegistry(): { authStorage: AuthStorage; modelRegistry: ModelRegist
 export async function buildRuntime(sessionManager: SessionManager): Promise<AgentSessionRuntime> {
 	const { authStorage, modelRegistry } = buildRegistry();
 
-	const customTools = await buildCustomTools();
+	// Memory is built once (like the other custom tools) so the file location is
+	// fixed for the process; its snapshot is re-read per session below.
+	const memory = config.memoryEnabled ? createMemoryStore({ dir: config.memoryDir }) : null;
+	const customTools = [...(await buildCustomTools()), ...(memory?.tools ?? [])];
 	const toolNames = [...BUILTIN_TOOLS, ...customTools.map((t) => t.name)];
 
+	// The editable system prompt and the context-monitor extension are fixed for
+	// the process; both are wired through the resource loader below.
+	const systemPrompt = loadSystemPrompt(config.systemPromptPath);
+	const extensionFactories = [createContextMonitor({ warnPercent: config.contextWarnPercent })];
+
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
-		const services = await createAgentSessionServices({ cwd, authStorage, modelRegistry });
+		const services = await createAgentSessionServices({
+			cwd,
+			authStorage,
+			modelRegistry,
+			resourceLoaderOptions: {
+				// Replace the base prompt with our editable file (when present);
+				// the default SDK prompt is used when it returns undefined.
+				...(systemPrompt ? { systemPromptOverride: () => systemPrompt } : {}),
+				// Re-read memory on each session (re)creation so the latest facts are
+				// injected — additive, preserving Pi's own appends and the base prompt.
+				...(memory
+					? {
+							appendSystemPromptOverride: (base) => {
+								const ctx = memory.readContext();
+								return ctx ? [...base, ctx] : base;
+							},
+						}
+					: {}),
+				extensionFactories,
+			},
+		});
 
 		const model = modelRegistry.find(PROVIDER, MODEL_ID);
 		if (!model) {

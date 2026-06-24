@@ -6,6 +6,7 @@
  * allowed to touch.
  */
 
+import { readFileSync } from "node:fs";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import pg from "pg";
 import { Type } from "typebox";
@@ -13,12 +14,57 @@ import { Type } from "typebox";
 /** Max rows echoed back to the model, to keep tool results bounded. */
 const MAX_ROWS = 200;
 
+export interface PostgresSslOptions {
+	/** Value of DATABASE_SSL (disable | require | no-verify | verify). */
+	mode?: string;
+	/** Path to a CA certificate (PEM) for verification. */
+	caCertPath?: string;
+}
+
 function textResult(text: string): { content: { type: "text"; text: string }[]; details: unknown } {
 	return { content: [{ type: "text", text }], details: {} };
 }
 
-export function createPostgresTools(databaseUrl: string): ToolDefinition[] {
-	const pool = new pg.Pool({ connectionString: databaseUrl, max: 4 });
+/** Format a pg error, appending a hint when it looks like a TLS/SSL config problem. */
+function formatPgError(err: unknown): string {
+	const message = (err as Error).message ?? String(err);
+	if (/ssl|tls|encrypt|certificat/i.test(message)) {
+		return `Postgres error: ${message}\nHint: this database's TLS setting may be wrong. Set DATABASE_SSL in .env (use "require" for managed cloud databases, "disable" for plain local Postgres).`;
+	}
+	return `Postgres error: ${message}`;
+}
+
+/** Translate DATABASE_SSL/DATABASE_CA_CERT into a node-postgres `ssl` option. */
+function resolveSsl({ mode, caCertPath }: PostgresSslOptions): pg.PoolConfig["ssl"] {
+	const normalized = (mode ?? "").trim().toLowerCase();
+	if (caCertPath) {
+		return { ca: readFileSync(caCertPath, "utf8"), rejectUnauthorized: true };
+	}
+	switch (normalized) {
+		case "":
+		case "disable":
+		case "false":
+		case "off":
+			return undefined; // no TLS
+		case "require":
+		case "no-verify":
+		case "allow":
+		case "prefer":
+			// Encrypt, but don't verify the cert — works with managed DBs whose
+			// CA isn't in the local trust store.
+			return { rejectUnauthorized: false };
+		case "verify":
+		case "verify-full":
+		case "true":
+		case "on":
+			return { rejectUnauthorized: true };
+		default:
+			return { rejectUnauthorized: false };
+	}
+}
+
+export function createPostgresTools(databaseUrl: string, ssl: PostgresSslOptions = {}): ToolDefinition[] {
+	const pool = new pg.Pool({ connectionString: databaseUrl, max: 4, ssl: resolveSsl(ssl) });
 	process.on("exit", () => {
 		void pool.end();
 	});
@@ -55,7 +101,7 @@ export function createPostgresTools(databaseUrl: string): ToolDefinition[] {
 					),
 				);
 			} catch (err) {
-				return textResult(`Postgres error: ${(err as Error).message}`);
+				return textResult(formatPgError(err));
 			}
 		},
 	});
@@ -87,7 +133,7 @@ export function createPostgresTools(databaseUrl: string): ToolDefinition[] {
 				);
 				return textResult(JSON.stringify(res.rows.map((r) => r.table_name), null, 2));
 			} catch (err) {
-				return textResult(`Postgres error: ${(err as Error).message}`);
+				return textResult(formatPgError(err));
 			}
 		},
 	});

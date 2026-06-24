@@ -9,7 +9,14 @@
  */
 
 import { runRpcMode, SessionManager } from "@earendil-works/pi-coding-agent";
+import { config } from "./config.ts";
 import { buildRuntime } from "./runtime.ts";
 
-const runtime = await buildRuntime(SessionManager.create(process.cwd()));
+// With MINIPI_RESUME=1, continue the most recent persisted thread for this cwd
+// (or start fresh if none); otherwise begin a new thread each launch.
+const sessionManager = config.resume
+	? SessionManager.continueRecent(process.cwd())
+	: SessionManager.create(process.cwd());
+
+const runtime = await buildRuntime(sessionManager);
 await runRpcMode(runtime);

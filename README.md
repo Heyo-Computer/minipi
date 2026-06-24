@@ -2,6 +2,9 @@
 
 A minimal local coding-agent harness built on the
 [Pi coding agent SDK](https://www.npmjs.com/package/@earendil-works/pi-coding-agent).
+
+The idea is an agent that fully utilizes on device models for routing and tool calling.
+
 It runs **fully local** against [Ollama](https://ollama.com) with Liquid AI's
 **lfm2.5** model, and exposes two entry points:
 
@@ -12,6 +15,8 @@ It runs **fully local** against [Ollama](https://ollama.com) with Liquid AI's
 
 Always on (built in to the SDK): **`bash`**, **`read`**, **`write`**.
 
+On by default: **`memory_write`**, **`memory_read`**, **`memory_search`** (disable with `MINIPI_MEMORY=off`).
+
 Opt-in via `.env` (registered only when configured):
 
 | Tool(s)                            | Enabled by      | What it does                                            |
@@ -19,6 +24,40 @@ Opt-in via `.env` (registered only when configured):
 | `postgres_query`, `postgres_schema`| `DATABASE_URL`  | Run SQL and introspect tables/columns on PostgreSQL.    |
 | `web_search`                       | `TAVILY_API_KEY`| Web search via [Tavily](https://tavily.com).            |
 | `<server>__<tool>`                 | `MCP_SERVERS`   | Every tool from each configured stdio MCP server.       |
+
+### Memory
+
+A lightweight long-term memory so facts survive across sessions. The agent saves
+durable notes with `memory_write` (and recalls them with `memory_read` /
+`memory_search`), stored as a single plain-markdown `MEMORY.md` under
+`.minipi/memory/` (override with `MINIPI_MEMORY_DIR`). The file is created lazily
+on first write.
+
+Crucially, recall is **automatic**: at the start of each session the runtime reads
+`MEMORY.md` and appends a `## Memory` block to the system prompt (via the SDK's
+`appendSystemPromptOverride`), so the model remembers without having to call a
+tool — important for a small local model. Injection is capped (~4 KB, most recent
+entries) to keep the context bounded; older facts remain reachable via
+`memory_search`. No embeddings or external dependencies. Set `MINIPI_MEMORY=off`
+to disable entirely.
+
+### System prompt
+
+The agent's system prompt lives in an editable markdown file, **`prompts/system.md`**,
+loaded at boot. Because the target models are tiny, the prompt is the biggest lever
+you have — edit that file to tune behavior. It **replaces** Pi's default prompt
+(dropping the SDK's verbose pi-docs scaffold), so the file itself carries the role
+and tool/memory guidance. Point `MINIPI_SYSTEM_PROMPT_PATH` at your own file to
+override; if the file is missing, the SDK's built-in default is used. Memory's
+`## Memory` block is still appended on top, independently.
+
+### Context tidy
+
+A small in-process extension (`src/extensions/context-monitor.ts`) watches context
+usage and, once it crosses `MINIPI_CONTEXT_WARN_PCT` (default 75%), shows a footer
+hint and a one-time warning suggesting **`/tidy`**. `/tidy` offers a choice to
+**compact** (summarize and continue) or **clear** (start fresh) — wrapping the
+built-in `/compact` and `/new`. It only suggests; it never compacts on its own.
 
 ## How it works
 
@@ -34,6 +73,12 @@ the session as `customTools`. Both entry points share that runtime:
 The custom tools (auth/connections) are built **once** per process and closed over by the
 runtime factory, so MCP servers and the Postgres pool connect a single time and survive
 session replacement.
+
+The runtime stays on the SDK's low-level path but reaches the rest of Pi through
+`resourceLoaderOptions`: `systemPromptOverride` swaps in `prompts/system.md`,
+`appendSystemPromptOverride` injects memory, and `extensionFactories` loads the
+context-monitor extension (which is how `/tidy` and the usage hint get wired without
+running the full `pi` package system).
 
 MCP tools forward their server's JSON Schema `inputSchema` straight through as the Pi
 tool's `parameters` — Pi's validator accepts plain JSON Schema, so no schema conversion is
